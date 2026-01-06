@@ -1,0 +1,20 @@
+{
+  "broker_host": "10.39.1.180",
+  "broker_port": 1883,
+  "broker_user": "mqttadmin",
+  "broker_pass": "itsme",
+
+  "subscribe_topics": ["factory/+/telemetry"],
+  "mqtt_qos": 1,
+
+  "db_host": "10.39.1.180",
+  "db_port": 27017,
+  "db_name": "iot-sensors-db",
+  "db_collection": "iot-sensors-data",
+  "db_user": "qube",
+  "db_pass": "itsme",
+  "db_auth_source": "admin",
+
+  "mongo_connect_timeout_ms": 5000,
+  "mongo_server_select_timeout_ms": 5000
+}

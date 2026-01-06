@@ -1,0 +1,49 @@
+{
+  "broker_host": "10.39.1.180",
+  "broker_port": 1883,
+  "broker_user": "mqttadmin",
+  "broker_pass": "itsme",
+
+  "client_id_prefix": "edge-aiiot-sim",
+  "publish_interval_sec": 1,
+  "qos": 1,
+
+  "rpm_drift": {
+    "enabled": true,
+    "drift_percent": 2.0,
+    "drift_period_sec": 180,
+    "jitter_rpm": 5.0
+  },
+
+  "temperature_model": {
+    "ambient_c": 28,
+    "normal_min_c": 45,
+    "normal_max_c": 65,
+    "overheat_c": 90,
+    "rise_rate_c_per_sec": 0.08,
+    "cool_rate_c_per_sec": 0.05
+  },
+
+  "devices": [
+    {
+      "device_id": "motor01",
+      "topic_pub": "factory/motor01/telemetry",
+      "topic_cmd": "factory/motor01/cmd",
+      "mode": "normal",
+      "rpm": 1450,
+      "temp_fault": "normal"
+    },
+    {
+      "device_id": "motor02",
+      "topic_pub": "factory/motor02/telemetry",
+      "topic_cmd": "factory/motor02/cmd",
+      "mode": "bearing_wear",
+      "rpm": 1450,
+      "temp_fault": "normal"
+    }
+  ],
+
+  "subscribe_topics": [
+    "factory/+/telemetry"
+  ]
+}
