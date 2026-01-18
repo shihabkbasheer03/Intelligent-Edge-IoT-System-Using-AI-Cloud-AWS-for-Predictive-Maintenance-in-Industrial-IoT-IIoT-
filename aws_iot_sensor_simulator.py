@@ -2,9 +2,10 @@
 """
 AWS IoT Core Sensor Simulator (MPU6050, DS18B20, SCT-013, INMP441)
 
-Publishes JSON telemetry to AWS IoT Core using AWSIoTPythonSDK, similar to your BedSideMonitor example.
+Publishes JSON telemetry to AWS IoT Core using AWSIoTPythonSDK.
 
-Notes:
+Update:
+- Supports MULTIPLE devices: motor01 and motor02 (both publish data)
 - INMP441 publishes audio FEATURES (sound_db, rms_amp, hf_energy_ratio), NOT raw audio stream.
 """
 
@@ -95,10 +96,9 @@ def simulate_temperature(temp_c: float, fault: str):
     """
     DS18B20 temperature model.
     """
-    # normal operating band
     normal_min = 28.0
     normal_max = 45.0
-    rise_rate = 0.05  # C/sec-ish (depending on publish interval)
+    rise_rate = 0.05  # C/sec-ish
 
     if fault == "overheating":
         temp_c += rise_rate * 3.0
@@ -176,86 +176,86 @@ def simulate_sound(vib_health: float, fault: str):
 
 
 # ----------------------------
-# Publishing function
+# Publishing function (MULTI DEVICE)
 # ----------------------------
 def publishSensorTelemetry(loopCount):
-    global device_state
+    global devices
 
     try:
-        now_ts = iso_now()
-        elapsed = time.time() - device_state["start_time"]
+        for device_state in devices.values():
+            now_ts = iso_now()
+            elapsed = time.time() - device_state["start_time"]
 
-        # optional rpm drift
-        base_rpm = device_state["rpm_base"]
-        drift = base_rpm * (device_state["rpm_drift_percent"] / 100.0) * math.sin(
-            2 * math.pi * elapsed / device_state["rpm_drift_period_sec"]
-        )
-        jitter = random.uniform(-device_state["rpm_jitter"], device_state["rpm_jitter"])
-        rpm_now = max(0.0, base_rpm + drift + jitter)
+            # RPM drift
+            base_rpm = device_state["rpm_base"]
+            drift = base_rpm * (device_state["rpm_drift_percent"] / 100.0) * math.sin(
+                2 * math.pi * elapsed / device_state["rpm_drift_period_sec"]
+            )
+            jitter = random.uniform(-device_state["rpm_jitter"], device_state["rpm_jitter"])
+            rpm_now = max(0.0, base_rpm + drift + jitter)
 
-        # Publish MPU6050 every 1 sec
-        if loopCount % device_state["freq_mpu"] == 0:
-            mpu = simulate_mpu6050(device_state["mpu_fault"], rpm_now, elapsed)
-            payload = {
-                "timestamp_utc": now_ts,
-                "device_id": device_state["device_id"],
-                "sensor": "MPU6050",
-                "rpm": round(rpm_now, 2),
-                "data": mpu,
-            }
-            myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
-            if args.mode == "publish":
-                print(f"[PUB] {topic} MPU6050 -> {payload['data']}")
+            # Publish MPU6050 every 1 sec
+            if loopCount % device_state["freq_mpu"] == 0:
+                mpu = simulate_mpu6050(device_state["mpu_fault"], rpm_now, elapsed)
+                payload = {
+                    "timestamp_utc": now_ts,
+                    "device_id": device_state["device_id"],
+                    "sensor": "MPU6050",
+                    "rpm": round(rpm_now, 2),
+                    "data": mpu,
+                }
+                myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
+                if args.mode == "publish":
+                    print(f"[PUB] {topic} {device_state['device_id']} MPU6050 -> {payload['data']}")
 
-        # Publish DS18B20 every 15 sec
-        if loopCount % device_state["freq_temp"] == 0:
-            device_state["temp_c"] = simulate_temperature(device_state["temp_c"], device_state["temp_fault"])
-            payload = {
-                "timestamp_utc": now_ts,
-                "device_id": device_state["device_id"],
-                "sensor": "DS18B20",
-                "rpm": round(rpm_now, 2),
-                "data": {
-                    "temperature_c": device_state["temp_c"],
-                    "fault_state": device_state["temp_fault"],
-                },
-            }
-            myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
-            if args.mode == "publish":
-                print(f"[PUB] {topic} DS18B20 -> {payload['data']}")
+            # Publish DS18B20 every 15 sec
+            if loopCount % device_state["freq_temp"] == 0:
+                device_state["temp_c"] = simulate_temperature(device_state["temp_c"], device_state["temp_fault"])
+                payload = {
+                    "timestamp_utc": now_ts,
+                    "device_id": device_state["device_id"],
+                    "sensor": "DS18B20",
+                    "rpm": round(rpm_now, 2),
+                    "data": {
+                        "temperature_c": device_state["temp_c"],
+                        "fault_state": device_state["temp_fault"],
+                    },
+                }
+                myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
+                if args.mode == "publish":
+                    print(f"[PUB] {topic} {device_state['device_id']} DS18B20 -> {payload['data']}")
 
-        # Publish SCT-013 every 10 sec
-        if loopCount % device_state["freq_current"] == 0:
-            current_a = simulate_current(rpm_now, device_state["current_fault"])
-            payload = {
-                "timestamp_utc": now_ts,
-                "device_id": device_state["device_id"],
-                "sensor": "SCT-013",
-                "rpm": round(rpm_now, 2),
-                "data": {
-                    "current_a": current_a,
-                    "fault_state": device_state["current_fault"],
-                },
-            }
-            myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
-            if args.mode == "publish":
-                print(f"[PUB] {topic} SCT-013 -> {payload['data']}")
+            # Publish SCT-013 every 10 sec
+            if loopCount % device_state["freq_current"] == 0:
+                current_a = simulate_current(rpm_now, device_state["current_fault"])
+                payload = {
+                    "timestamp_utc": now_ts,
+                    "device_id": device_state["device_id"],
+                    "sensor": "SCT-013",
+                    "rpm": round(rpm_now, 2),
+                    "data": {
+                        "current_a": current_a,
+                        "fault_state": device_state["current_fault"],
+                    },
+                }
+                myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
+                if args.mode == "publish":
+                    print(f"[PUB] {topic} {device_state['device_id']} SCT-013 -> {payload['data']}")
 
-        # Publish INMP441 every 5 sec
-        if loopCount % device_state["freq_sound"] == 0:
-            # correlate sound with last mpu health by simulating again quickly:
-            mpu_for_health = simulate_mpu6050(device_state["mpu_fault"], rpm_now, elapsed)
-            sound = simulate_sound(mpu_for_health["health_score"], device_state["sound_fault"])
-            payload = {
-                "timestamp_utc": now_ts,
-                "device_id": device_state["device_id"],
-                "sensor": "INMP441",
-                "rpm": round(rpm_now, 2),
-                "data": sound,
-            }
-            myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
-            if args.mode == "publish":
-                print(f"[PUB] {topic} INMP441 -> {payload['data']}")
+            # Publish INMP441 every 5 sec
+            if loopCount % device_state["freq_sound"] == 0:
+                mpu_for_health = simulate_mpu6050(device_state["mpu_fault"], rpm_now, elapsed)
+                sound = simulate_sound(mpu_for_health["health_score"], device_state["sound_fault"])
+                payload = {
+                    "timestamp_utc": now_ts,
+                    "device_id": device_state["device_id"],
+                    "sensor": "INMP441",
+                    "rpm": round(rpm_now, 2),
+                    "data": sound,
+                }
+                myAWSIoTMQTTClient.publish(topic, json.dumps(payload), 1)
+                if args.mode == "publish":
+                    print(f"[PUB] {topic} {device_state['device_id']} INMP441 -> {payload['data']}")
 
     except publishTimeoutException:
         print(
@@ -268,7 +268,7 @@ def publishSensorTelemetry(loopCount):
 
 
 # ----------------------------
-# Args (same style as your code)
+# Args
 # ----------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("-e", "--endpoint", action="store", required=True, dest="host", help="AWS IoT custom endpoint")
@@ -277,13 +277,12 @@ parser.add_argument("-c", "--cert", action="store", dest="certificatePath", help
 parser.add_argument("-k", "--key", action="store", dest="privateKeyPath", help="Private key file path")
 parser.add_argument("-p", "--port", action="store", dest="port", type=int, help="Port override")
 parser.add_argument("-w", "--websocket", action="store_true", dest="useWebsocket", default=False, help="MQTT over WebSocket")
-parser.add_argument("-id", "--clientId", action="store", dest="clientId", default="sensorSimulator", help="Client ID")
+parser.add_argument("-id", "--clientId", action="store", dest="clientId", default="motorSimulator", help="Client ID")
 parser.add_argument("-t", "--topic", action="store", dest="topic", default="factory/sim/telemetry", help="Topic")
 parser.add_argument("-m", "--mode", action="store", dest="mode", default="both", help=f"Modes: {AllowedActions}")
 
-# Simulator tuning
-parser.add_argument("--device", default="EDGE_D001", help="Device ID")
-parser.add_argument("--rpm", type=float, default=1450.0, help="Base RPM")
+# (kept for compatibility; motor01 uses this rpm as base)
+parser.add_argument("--rpm", type=float, default=1450.0, help="Base RPM for motor01")
 parser.add_argument("--mpu_fault", default="normal", help="MPU fault: normal|bearing_wear|misalignment")
 parser.add_argument("--temp_fault", default="normal", help="Temp fault: normal|overheating|cooling_failure")
 parser.add_argument("--current_fault", default="normal", help="Current fault: normal|overload|imbalance")
@@ -318,9 +317,9 @@ if args.useWebsocket and not args.port:
 if not args.useWebsocket and not args.port:
     port = 8883
 
-# Logging (same style)
+# Logging
 logger = logging.getLogger("AWSIoTPythonSDK.core")
-logger.setLevel(logging.INFO)  # change to DEBUG if needed
+logger.setLevel(logging.INFO)  # set DEBUG if needed
 streamHandler = logging.StreamHandler()
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 streamHandler.setFormatter(formatter)
@@ -349,31 +348,57 @@ if args.mode in ("both", "subscribe"):
     myAWSIoTMQTTClient.subscribe(topic, 1, customCallback)
 time.sleep(1)
 
-# Device state
-device_state = {
-    "device_id": args.device,
-    "start_time": time.time(),
+# ----------------------------
+# MULTI MOTOR DEVICE STATES
+# ----------------------------
+devices = {
+    "motor01": {
+        "device_id": "motor01",
+        "start_time": time.time(),
 
-    "rpm_base": float(args.rpm),
-    "rpm_drift_percent": 2.0,
-    "rpm_drift_period_sec": 120.0,
-    "rpm_jitter": 5.0,
+        "rpm_base": float(args.rpm),
+        "rpm_drift_percent": 2.0,
+        "rpm_drift_period_sec": 120.0,
+        "rpm_jitter": 5.0,
 
-    "mpu_fault": args.mpu_fault,
-    "temp_fault": args.temp_fault,
-    "current_fault": args.current_fault,
-    "sound_fault": args.sound_fault,
+        "mpu_fault": args.mpu_fault,
+        "temp_fault": args.temp_fault,
+        "current_fault": args.current_fault,
+        "sound_fault": args.sound_fault,
 
-    "temp_c": 30.0,
+        "temp_c": 30.0,
 
-    # publish frequencies (in seconds)
-    "freq_mpu": 1,         # every 1 sec
-    "freq_temp": 15,       # every 15 sec
-    "freq_current": 10,    # every 10 sec
-    "freq_sound": 5,       # every 5 sec
+        "freq_mpu": 1,       # every 1 sec
+        "freq_temp": 15,     # every 15 sec
+        "freq_current": 10,  # every 10 sec
+        "freq_sound": 5,     # every 5 sec
+    },
+    "motor02": {
+        "device_id": "motor02",
+        "start_time": time.time(),
+
+        # Give motor02 slightly different characteristics
+        "rpm_base": float(args.rpm) - 120.0,
+        "rpm_drift_percent": 3.0,
+        "rpm_drift_period_sec": 90.0,
+        "rpm_jitter": 7.0,
+
+        # Example: motor02 has early bearing wear
+        "mpu_fault": "bearing_wear",
+        "temp_fault": "normal",
+        "current_fault": "imbalance",
+        "sound_fault": "bearing_noise",
+
+        "temp_c": 32.0,
+
+        "freq_mpu": 1,
+        "freq_temp": 15,
+        "freq_current": 10,
+        "freq_sound": 5,
+    },
 }
 
-# Scheduler loop (same pattern as your sample)
+# Scheduler loop
 loopCount = 0
 scheduler = sched.scheduler(time.time, time.sleep)
 now = time.time()
