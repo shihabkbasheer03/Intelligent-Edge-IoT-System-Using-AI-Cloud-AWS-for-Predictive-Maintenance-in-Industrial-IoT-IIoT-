@@ -4,27 +4,36 @@ import json
 from decimal import Decimal
 from datetime import datetime, timezone
 
+# ---------- AWS ----------
 REGION = "eu-north-1"
 KINESIS_STREAM = "IoT_Sensor_Stream"
 SHARD_ID = "shardId-000000000002"
 DDB_TABLE = "IoT_Sensor_anamoly"
 
-# Thresholds (adjust to your project)
-TEMP_MIN_C = Decimal("0")
-TEMP_MAX_C = Decimal("80")
-
-CURRENT_MIN_A = Decimal("0.10")
-CURRENT_MAX_A = Decimal("15.0")
-
-SOUND_MAX_DB = Decimal("80")          # if you store sound in dB
-SOUND_RMS_MAX = Decimal("0.50")       # if you store RMS (0-1), adjust based on your data
-
-VIB_RMS_ANOMALY_G = Decimal("0.05")
-HEALTH_SCORE_MIN = Decimal("80")
-
 kinesis = boto3.client("kinesis", region_name=REGION)
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(DDB_TABLE)
+
+# ---------- THRESHOLDS (tune as per your project) ----------
+TH = {
+    # MPU6050
+    "VIB_RMS_G_HIGH": Decimal("0.055"),     # anomaly if >= 0.055g
+    "HEALTH_SCORE_LOW": Decimal("78"),      # anomaly if <= 78
+
+    # DS18B20 temperature (°C)
+    "TEMP_C_LOW": Decimal("10"),
+    "TEMP_C_HIGH": Decimal("70"),
+
+    # SCT-013 current (A)
+    "CURRENT_A_LOW": Decimal("0.20"),
+    "CURRENT_A_HIGH": Decimal("15.0"),
+
+    # INMP441 sound (if using RMS 0-1 scale or similar)
+    "SOUND_RMS_HIGH": Decimal("0.60"),
+
+    # If you store sound in dB instead, use this too
+    "SOUND_DB_HIGH": Decimal("85"),
+}
 
 def now_utc_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -39,169 +48,172 @@ def to_decimal(x):
     except Exception:
         return None
 
-def parse_kinesis(data_bytes: bytes) -> dict:
+def parse_record(data_bytes: bytes) -> dict:
     return json.loads(data_bytes.decode("utf-8"), parse_float=Decimal)
 
-def get_nested(data: dict, *keys):
-    cur = data
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return None
-        cur = cur[k]
-    return cur
+def get_data_dict(r: dict) -> dict:
+    d = r.get("data")
+    return d if isinstance(d, dict) else {}
 
-def anomaly_for_record(r: dict):
+def get_timestamp(r: dict) -> str:
+    ts = r.get("timestamp_utc")
+    return str(ts) if ts else now_utc_iso()
+
+def get_device_id(r: dict) -> str:
+    return str(r.get("device_id", "unknown_device"))
+
+# ----------------- ANOMALY DETECTION (ALL SENSORS) -----------------
+def detect_anomaly(r: dict):
     """
-    Return (is_anomaly, reason, metrics_dict)
+    Returns:
+      (is_anomaly: bool, anomaly_type: str, reason: str, metrics: dict)
     """
     sensor = str(r.get("sensor", "")).upper()
-    data = r.get("data") or {}
+    datatype = str(r.get("datatype", "")).lower()
+    data = get_data_dict(r)
 
-    # ---------- MPU6050 ----------
+    # ---- MPU6050 ----
     if sensor == "MPU6050":
         vib = to_decimal(data.get("vibration_rms_g"))
         health = to_decimal(data.get("health_score"))
-        fault = str(data.get("fault_state", "normal")).lower()
+        fault_state = str(data.get("fault_state", "normal"))
 
         metrics = {
             "sensor": sensor,
-            "rpm": r.get("rpm"),
+            "rpm": to_decimal(r.get("rpm")),
             "vibration_rms_g": vib,
             "health_score": health,
-            "fault_state": fault,
+            "fault_state": fault_state,
         }
 
-        if fault != "normal":
-            return True, f"fault_state={fault}", metrics
-        if vib is not None and vib > VIB_RMS_ANOMALY_G:
-            return True, f"vibration_rms_g>{VIB_RMS_ANOMALY_G}", metrics
-        if health is not None and health < HEALTH_SCORE_MIN:
-            return True, f"health_score<{HEALTH_SCORE_MIN}", metrics
+        if vib is not None and vib >= TH["VIB_RMS_G_HIGH"]:
+            return True, "MPU6050_HIGH_VIBRATION", f"vibration_rms_g={vib} >= {TH['VIB_RMS_G_HIGH']}", metrics
 
-        return False, "normal", metrics
+        if health is not None and health <= TH["HEALTH_SCORE_LOW"]:
+            return True, "MPU6050_LOW_HEALTH", f"health_score={health} <= {TH['HEALTH_SCORE_LOW']}", metrics
 
-    # ---------- DS18B20 ----------
-    if sensor == "DS18B20":
-        # Support multiple possible field names
+        # NOTE: we DO NOT mark anomaly only by fault_state label (prevents too many rows)
+        return False, "NORMAL", "within_threshold", metrics
+
+    # ---- DS18B20 ----
+    if sensor == "DS18B20" or "ds18b20" in datatype or "temp" in datatype:
         temp = (
             to_decimal(r.get("temperature_c"))
             or to_decimal(data.get("temperature_c"))
             or to_decimal(r.get("temp_c"))
             or to_decimal(data.get("temp_c"))
-            or to_decimal(data.get("temperature"))
+            or to_decimal(r.get("value"))
+            or to_decimal(data.get("value"))
         )
 
-        metrics = {"sensor": sensor, "temperature_c": temp}
+        metrics = {"sensor": "DS18B20", "temperature_c": temp}
 
-        if temp is not None and (temp < TEMP_MIN_C or temp > TEMP_MAX_C):
-            return True, f"temperature_c_out_of_range({TEMP_MIN_C}-{TEMP_MAX_C})", metrics
+        if temp is not None and temp < TH["TEMP_C_LOW"]:
+            return True, "DS18B20_LOW_TEMP", f"temperature_c={temp} < {TH['TEMP_C_LOW']}", metrics
+        if temp is not None and temp > TH["TEMP_C_HIGH"]:
+            return True, "DS18B20_HIGH_TEMP", f"temperature_c={temp} > {TH['TEMP_C_HIGH']}", metrics
 
-        return False, "normal", metrics
+        return False, "NORMAL", "within_threshold", metrics
 
-    # ---------- SCT-013 ----------
-    if sensor in ("SCT-013", "SCT013"):
-        current = (
+    # ---- SCT-013 ----
+    if sensor in ("SCT-013", "SCT013") or "current" in datatype or "amps" in datatype:
+        cur = (
             to_decimal(r.get("current_a"))
             or to_decimal(data.get("current_a"))
             or to_decimal(data.get("current"))
             or to_decimal(data.get("amps"))
+            or to_decimal(r.get("value"))
+            or to_decimal(data.get("value"))
         )
 
-        metrics = {"sensor": "SCT-013", "current_a": current}
+        metrics = {"sensor": "SCT-013", "current_a": cur}
 
-        if current is not None and (current < CURRENT_MIN_A or current > CURRENT_MAX_A):
-            return True, f"current_a_out_of_range({CURRENT_MIN_A}-{CURRENT_MAX_A})", metrics
+        if cur is not None and cur < TH["CURRENT_A_LOW"]:
+            return True, "SCT013_LOW_CURRENT", f"current_a={cur} < {TH['CURRENT_A_LOW']}", metrics
+        if cur is not None and cur > TH["CURRENT_A_HIGH"]:
+            return True, "SCT013_HIGH_CURRENT", f"current_a={cur} > {TH['CURRENT_A_HIGH']}", metrics
 
-        return False, "normal", metrics
+        return False, "NORMAL", "within_threshold", metrics
 
-    # ---------- INMP441 ----------
-    if sensor == "INMP441":
-        # Support either dB or RMS style
+    # ---- INMP441 ----
+    if sensor == "INMP441" or "sound" in datatype or "noise" in datatype:
+        sound_rms = (
+            to_decimal(r.get("sound_rms"))
+            or to_decimal(data.get("sound_rms"))
+            or to_decimal(r.get("rms"))
+            or to_decimal(data.get("rms"))
+            or to_decimal(r.get("value"))
+            or to_decimal(data.get("value"))
+        )
         sound_db = (
             to_decimal(r.get("sound_db"))
             or to_decimal(data.get("sound_db"))
+            or to_decimal(r.get("noise_db"))
             or to_decimal(data.get("noise_db"))
         )
-        sound_rms = (
-            to_decimal(r.get("rms"))
-            or to_decimal(data.get("rms"))
-            or to_decimal(data.get("sound_rms"))
-        )
 
-        metrics = {"sensor": sensor, "sound_db": sound_db, "sound_rms": sound_rms}
+        metrics = {"sensor": "INMP441", "sound_rms": sound_rms, "sound_db": sound_db}
 
-        if sound_db is not None and sound_db > SOUND_MAX_DB:
-            return True, f"sound_db>{SOUND_MAX_DB}", metrics
+        if sound_db is not None and sound_db >= TH["SOUND_DB_HIGH"]:
+            return True, "INMP441_HIGH_DB", f"sound_db={sound_db} >= {TH['SOUND_DB_HIGH']}", metrics
 
-        if sound_rms is not None and sound_rms > SOUND_RMS_MAX:
-            return True, f"sound_rms>{SOUND_RMS_MAX}", metrics
+        if sound_rms is not None and sound_rms >= TH["SOUND_RMS_HIGH"]:
+            return True, "INMP441_HIGH_RMS", f"sound_rms={sound_rms} >= {TH['SOUND_RMS_HIGH']}", metrics
 
-        return False, "normal", metrics
+        return False, "NORMAL", "within_threshold", metrics
 
-    # Unknown sensor
-    return False, "unknown_sensor", {"sensor": sensor}
+    return False, "UNKNOWN_SENSOR", "no_rules_for_sensor", {"sensor": sensor}
 
-
-def build_ddb_item(r: dict, reason: str, metrics: dict) -> dict:
-    # DynamoDB keys must exist
-    device_id = str(r.get("device_id", "unknown_device"))
-    ts = str(r.get("timestamp_utc", now_utc_iso()))
-
-    # Ensure timestamp exists (important for RANGE key)
-    if not ts:
-        ts = now_utc_iso()
+# ----------------- DYNAMODB ITEM -----------------
+def build_item(r: dict, anomaly_type: str, reason: str, metrics: dict) -> dict:
+    # Keys
+    device_id = get_device_id(r)
+    timestamp_utc = get_timestamp(r)
 
     item = {
         "device_id": device_id,
-        "timestamp_utc": ts,
+        "timestamp_utc": timestamp_utc,
+        "sensor": metrics.get("sensor", str(r.get("sensor", ""))),
+        "anomaly_type": anomaly_type,
         "anomaly_reason": reason,
         "payload": r,
     }
 
-    # Add flattened metrics (no None values)
+    # Add flattened metrics for easy filtering
     for k, v in metrics.items():
         if v is not None:
             item[k] = v
 
     return item
 
-
-# ---- Optional: test write to confirm DynamoDB insert works ----
-test_item = {
-    "device_id": "test_device",
-    "timestamp_utc": now_utc_iso(),
-    "anomaly_reason": "test_write",
-    "sensor": "TEST"
-}
-print("DynamoDB TEST write:", table.put_item(Item=test_item)["ResponseMetadata"]["HTTPStatusCode"])
-
-# ---- Kinesis iterator ----
-it = kinesis.get_shard_iterator(
+# ----------------- MAIN LOOP -----------------
+shard_iterator = kinesis.get_shard_iterator(
     StreamName=KINESIS_STREAM,
     ShardId=SHARD_ID,
     ShardIteratorType="LATEST",
 )["ShardIterator"]
 
-print(f"Listening: {KINESIS_STREAM} / {SHARD_ID} ({REGION}) -> DynamoDB: {DDB_TABLE}")
+print(f"Listening: stream={KINESIS_STREAM}, shard={SHARD_ID}, region={REGION}")
+print(f"Writing ONLY anomalies to DynamoDB table: {DDB_TABLE}")
 
 while True:
-    resp = kinesis.get_records(ShardIterator=it, Limit=100)
-    it = resp["NextShardIterator"]
+    resp = kinesis.get_records(ShardIterator=shard_iterator, Limit=100)
+    shard_iterator = resp["NextShardIterator"]
 
     for rec in resp.get("Records", []):
-        readings = parse_kinesis(rec["Data"])
-        is_anom, reason, metrics = anomaly_for_record(readings)
+        readings = parse_record(rec["Data"])
+        is_anom, anom_type, reason, metrics = detect_anomaly(readings)
 
-        # Print all events to confirm payload structure
+        # Print for debug (optional)
         print(readings)
 
         if is_anom:
-            item = build_ddb_item(readings, reason, metrics)
+            item = build_item(readings, anom_type, reason, metrics)
             try:
                 out = table.put_item(Item=item)
                 code = out.get("ResponseMetadata", {}).get("HTTPStatusCode")
-                print(f"✅ Inserted anomaly to DynamoDB (HTTP {code}): {item['device_id']} {item.get('sensor')} {reason}")
+                print(f"✅ ANOMALY SAVED (HTTP {code}): {item['device_id']} {item['sensor']} {anom_type} | {reason}")
             except Exception as e:
-                print("❌ DynamoDB insert failed:", repr(e))
+                print("❌ DynamoDB put_item failed:", repr(e))
 
     time.sleep(0.2)
