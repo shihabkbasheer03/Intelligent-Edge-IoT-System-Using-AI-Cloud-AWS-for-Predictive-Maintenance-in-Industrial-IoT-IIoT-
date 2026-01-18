@@ -4,7 +4,7 @@ import json
 
 REGION = "eu-north-1"
 STREAM_NAME = "IoT_Sensor_Stream"          # your stream name
-SHARD_ID = "shardId-000000000000"          # choose 000/001/002 as needed
+SHARD_ID = "shardId-000000000002"          # choose 000/001/002 as needed
 
 client = boto3.client("kinesis", region_name=REGION)
 
