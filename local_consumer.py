@@ -5,8 +5,8 @@ import json
 
 client = boto3.client('kinesis')
 shardIterator = client.get_shard_iterator(
-    StreamName='BSM_Data_Stream1',
-    ShardId='shardId-000000000000',
+    StreamName='IoT_Sensor_Stream',
+    ShardId='shardId-000000000002',
     ShardIteratorType='LATEST',
 )['ShardIterator']
 
